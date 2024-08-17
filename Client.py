@@ -2,37 +2,29 @@ import socket
 import time
 import datetime
 
-def start_client(server_host='192.168.8.18', server_port=3318):
-    # Criar um socket TCP
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+class Client:
+    def __init__(self, host, port):
+        self.port = port
+        self.host = host
+        
+        try:
+            # Criar um socket TCP
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Definir timeout
+            self.client_socket.settimeout(10.0)  # Timeout de 10 segundos
 
-    # Definir timeout
-    client_socket.settimeout(10.0)  # Timeout de 10 segundos
-
-    # Dicionário para armazenar mensagens trocadas entre IDs
-    messages_dict = {}
-
-    try:
-        # Conectar ao servidor
-        client_socket.connect((server_host, server_port))
-        print(f"Conectado ao servidor em {server_host}:{server_port} \n")
-
-        # Receber mensagem inicial do servidor
-        initial_message = client_socket.recv(1024).decode()
-        print(f"Mensagem do servidor: {initial_message} \n")
-
-        # Enviar '01' para se cadastrar
-        message = "01"
-        client_socket.sendall(message.encode())
-        print("Mensagem '01' enviada. \n")
-
-        # Receber o ID único do servidor
-        modified_id = client_socket.recv(1024).decode()
-        print(f"Recebido do servidor: {modified_id} \n")
-        unique_id = modified_id[2:]
-        print(f"ID único: {unique_id} \n")
-
-        def convert_timestamp(timestamp):
+            # Dicionário para armazenar mensagens trocadas entre IDs
+            self.messages_dict = {}
+            
+            # Armazena confirmações de entrega
+            self.delivery_confirmations = {} 
+            
+            self.start()
+        except Exception as e:
+            print(f"Erro ao criar o socket: {e}")
+            
+        
+    def __convert_timestamp(timestamp):
             # Converter o timestamp Unix para um objeto datetime
             dt_object = datetime.datetime.fromtimestamp(timestamp)
             
@@ -41,7 +33,7 @@ def start_client(server_host='192.168.8.18', server_port=3318):
             
             return human_readable_time
 
-        def display_messages_with_id(participant_id):
+    def __display_messages_with_id(participant_id):
             if participant_id in messages_dict:
                 print(f"Mensagens trocadas com {participant_id}:")
                 for msg in messages_dict[participant_id]:
@@ -53,6 +45,8 @@ def start_client(server_host='192.168.8.18', server_port=3318):
             print("Menu:")
             print("1. Enviar mensagem")
             print("2. Verificar mensagens recebidas")
+            print("3. Criar grupo")
+            print("4. Ver grupos")
             print("9. Encerrar o programa")
             choice = input("Escolha uma opção: ")
 
@@ -74,48 +68,80 @@ def start_client(server_host='192.168.8.18', server_port=3318):
                 client_socket.sendall(formatted_message.encode())
                 print("Mensagem enviada ao servidor: ", formatted_message + "\n")
 
-                # Armazenar a mensagem enviada
-                if recipient_id not in messages_dict:
-                    messages_dict[recipient_id] = []
-                messages_dict[recipient_id].append(f"Enviado para {recipient_id} em {convert_timestamp(timestamp)}: {message_content}")
+        # Armazenar a mensagem enviada
+        if recipient_id not in messages_dict:
+            messages_dict[recipient_id] = []
+        messages_dict[recipient_id].append(f"Enviado para {recipient_id} em {convert_timestamp(timestamp)}: {message_content}")
+    
+    def verify_messages(self):
+        try:
+            data = self.client_socket.recv(1024).decode()
+            if data:
+                if data.startswith("Sucesso") or data.startswith("Erro"):
+                    print(f"Resposta do servidor: {data} \n")
+                # Processar confirmação de entrega    
+                elif data.startswith("07"):
+                    cod = data[:2]
+                    dst = data[2:15]
+                    timestamp_str = data[15:25].strip()
+
+                    try:
+                        timestamp = int(timestamp_str)
+                        print(f"Confirmação de entrega: Mensagens enviadas para {dst} até {convert_timestamp(timestamp)} foram entregues.")
+
+                        # Atualizar mensagens enviadas para o destinatário
+                        if dst in messages_dict:
+                            messages_dict[dst] = [msg for msg in messages_dict[dst] if int(msg.split(' em ')[1].split(': ')[0]) <= timestamp]
+                    except ValueError:
+                        print(f"Erro ao converter o timestamp: {timestamp_str} \n")
+                else:
+                    # Processar mensagem recebida (resposta do servidor com dados de quem enviou e data)
+                    src_id = data[2:15].strip()  # ID do remetente
+                    timestamp_str = data[30:40].strip()  # Timestamp
+                    message_data = data[40:].strip().replace("_", " ")  # Conteúdo da mensagem
+
+                    try:
+                        timestamp = int(timestamp_str)
+                        print(f"Mensagem recebida de {src_id} em {convert_timestamp(timestamp)}: {message_data} \n")
+
+                        # Armazenar a mensagem recebida
+                        if src_id not in messages_dict:
+                            messages_dict[src_id] = []
+                        messages_dict[src_id].append(f"Recebido de {src_id} em {convert_timestamp(timestamp)}: {message_data}")
+                    except ValueError:
+                        print(f"Erro ao converter o timestamp: {timestamp_str} \n")
+            else:
+                print("Nenhuma mensagem recebida. \n")
+        except socket.timeout:
+            print("Nenhuma mensagem recebida. \n")
+
+    def chosen_choice(self):
+        while True:
+            choice = self.choices()
+            if choice == '1':
+                # Enviar mensagem ao servidor
+                recipient_id = input("Digite o ID do destinatário (13 dígitos): ")
+                if len(recipient_id) != 13:
+                    print("O ID do destinatário deve ter exatamente 13 dígitos. \n")
+                    return
+                message_content = input("Digite o conteúdo da mensagem (máximo de 218 caracteres): ")
+                if len(message_content) > 218:
+                    print("O conteúdo da mensagem deve ter no máximo 218 caracteres. \n")
+                    return
+                # Enviar mensagem ao servidor
+                self.send_message(recipient_id, message_content)
 
             elif choice == '2':
                 # Verificar se há mensagens do servidor
-                try:
-                    data = client_socket.recv(1024).decode()
-                    if data:
-                        if data.startswith("Sucesso") or data.startswith("Erro"):
-                            print(f"Resposta do servidor: {data} \n")
-                        elif len(data):
-                            # Processar mensagem recebida (resposta do servidor com dados de quem enviou e data)
-                            src_id = data[2:15].strip()  # ID do remetente
-                            timestamp_str = data[30:40].strip()  # Timestamp
-                            message_data = data[40:].strip().replace("_", " ")  # Conteúdo da mensagem
-
-                            try:
-                                timestamp = int(timestamp_str)
-                                print(f"Mensagem recebida de {src_id} em {convert_timestamp(timestamp)}: {message_data} \n")
-                                
-                                # Armazenar a mensagem recebida
-                                if src_id not in messages_dict:
-                                    messages_dict[src_id] = []
-                                messages_dict[src_id].append(f"Recebido de {src_id} em {convert_timestamp(timestamp)}: {message_data}")
-                            except ValueError:
-                                print(f"Erro ao converter o timestamp: {timestamp_str} \n")
-                        else:
-                            print("Formato de mensagem inválido recebido. \n")
-                    else:
-                        print("Nenhuma mensagem recebida. \n")
-                except socket.timeout:
-                    print("Nenhuma mensagem recebida. \n")
-
+                self.verify_messages()
                 # Submenu para visualizar mensagens trocadas com um ID específico
                 while True:
+                    print("--------------------")
                     print("Submenu:")
                     print("1. Ver mensagens trocadas com um ID específico")
                     print("9. Voltar ao menu principal")
+                    print("--------------------")
                     sub_choice = input("Escolha uma opção: ")
-
                     if sub_choice == '1':
                         participant_id = input("Digite o ID do participante (13 dígitos): ")
                         if len(participant_id) != 13:
@@ -126,16 +152,80 @@ def start_client(server_host='192.168.8.18', server_port=3318):
                         break
                     else:
                         print("Opção inválida. Por favor, escolha 1 ou 9. \n")
+                        
+            elif choice == '3':
+                # Criar grupo
+                members = []
+                for i in range(7):
+                    member_id = input(f"Digite o ID do membro {i+1} (ou deixe em branco para parar): ")
+                    if member_id == "":
+                        break
+                    if len(member_id) != 13:
+                        print("O ID do membro deve ter exatamente 13 dígitos. \n")
+                        continue
+                    members.append(member_id)
 
+                if len(members) == 0:
+                    print("Você deve adicionar pelo menos um membro para criar um grupo. \n")
+                    continue
+
+                timestamp = int(time.time())
+                formatted_message = f"10{unique_id}{str(timestamp).ljust(10)}" + ''.join(members)
+                client_socket.sendall(formatted_message.encode())
+                print(f"Solicitação de criação de grupo enviada: {formatted_message} \n")
+                
+            elif choice == '4':
+                # Solicitar grupos ao servidor
+                formatted_message = f"12{unique_id}"
+                client_socket.sendall(formatted_message.encode())
+                print(f"Solicitação de visualização de grupos enviada: {formatted_message} \n")
+
+                # Receber resposta do servidor
+                group_data = client_socket.recv(1024).decode()
+                if group_data.startswith("13"):
+                    groups = group_data[2:].strip()
+                    if groups:
+                        print(f"Você faz parte dos seguintes grupos: {groups} \n")
+                    else:
+                        print("Você não faz parte de nenhum grupo. \n")
+                else:
+                    print("Resposta inesperada do servidor. \n")
+                
             elif choice == '9':
                 print("Desconectando... \n")
+                self.client_socket.close()
                 break
+            
             else:
                 print("Opção inválida. Por favor, escolha 1, 2 ou 9. \n")
 
-    finally:
-        # Fecha o socket independentemente de como o loop while termina
-        client_socket.close()
+    def start(self):
+        
+        try:
+            # Conectar ao servidor
+            self.client_socket.connect((self.host, self.port))
+            print(f"Conectado ao servidor em {self.host}:{self.port} \n")
+
+            # Receber mensagem inicial do servidor
+            initial_message = self.client_socket.recv(1024).decode()
+            print(f"Mensagem do servidor: {initial_message} \n")
+
+            # Enviar '01' para se cadastrar
+            message = "01"
+            self.client_socket.sendall(message.encode())
+            print("Mensagem '01' enviada. \n")
+
+            # Receber o ID único do servidor
+            modified_id = self.client_socket.recv(1024).decode()
+            print(f"Recebido do servidor: {modified_id} \n")
+            unique_id = modified_id[2:]
+            print(f"ID único: {unique_id} \n")
+
+            self.chosen_choice()
+                
+        except Exception as e:
+            print(f"Erro ao conectar ao servidor: {e}")
+            self.client_socket.close()
 
 if __name__ == '__main__':
-    start_client(server_host='192.168.8.18', server_port=3318)
+    start_client(server_host='localhost', server_port=3489)

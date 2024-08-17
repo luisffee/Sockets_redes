@@ -4,7 +4,7 @@ import time
 import random
 import threading
 
-HOST = '0.0.0.0'
+HOST = 'localhost'
 ports = [random.randint(1024, 4915) for _ in range(4)]  # Lista de portas aleatórias entre 1024 e 4915
 PORT = random.choice(ports)  # Seleciona uma porta aleatória da lista
 print(f"Servidor iniciado em {HOST}:{PORT}")
@@ -16,6 +16,10 @@ cursor = conn_db.cursor()
 # Cria a tabela 'clientes' se ela não existir
 cursor.execute('''CREATE TABLE IF NOT EXISTS clientes (id TEXT, endereco TEXT, timestamp TEXT)''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS mensagens (dst TEXT, src TEXT, timestamp TEXT, msg_data TEXT)''')
+conn_db.commit()
+
+# Cria a tabela 'grupos' se ela não existir
+cursor.execute('''CREATE TABLE IF NOT EXISTS grupos (group_id TEXT, member_id TEXT, timestamp TEXT)''')
 conn_db.commit()
 
 # Dicionário global para armazenar as conexões dos clientes
@@ -92,18 +96,63 @@ def handle_client(conn, addr):
                     msg_data = message[40:]
 
                     print(f"Mensagem decodificada - COD: {cod}, SRC: {src}, DST: '{dst}', TIMESTAMP: {timestamp}, DATA: {msg_data}")
+                    
+                    if cod == "10":  # Mensagem de criação de grupo
+                        creator_id = message[2:15].strip()
+                        timestamp = message[15:25].strip()
 
-                    with client_connections_lock:
-                        if dst in client_connections:
-                            dest_conn = client_connections[dst]
-                            dest_conn.sendall(data)
-                            conn.sendall(f"Sucesso: Mensagem enviada para {dst}! \n".encode())
+                        # Extrair membros corretamente
+                        members = [message[i:i+13].strip() for i in range(25, len(message), 13)]
+
+                        # Gera um ID único de grupo
+                        group_id = ''.join([str(random.randint(0, 9)) for _ in range(13)])
+
+                        # Armazenar o grupo no banco de dados
+                        for member_id in [creator_id] + members:
+                            cursor.execute("INSERT INTO grupos (group_id, member_id, timestamp) VALUES (?, ?, ?)",
+                                        (group_id, member_id, timestamp))
+                        conn_db.commit()
+
+                        # Notificar os membros e o criador do grupo
+                        notification_message = f"11{group_id}{timestamp}" + ''.join([creator_id] + members)
+
+                        with client_connections_lock:
+                            for member_id in [creator_id] + members:
+                                if member_id in client_connections:
+                                    client_connections[member_id].sendall(notification_message.encode())
+                                else:
+                                    cursor.execute("INSERT INTO mensagens (dst, src, timestamp, msg_data) VALUES (?, ?, ?, ?)",
+                                                (member_id, group_id, timestamp, notification_message[40:]))
+                                    conn_db.commit()
+
+                        print(f"Grupo criado com ID {group_id} e membros {', '.join([creator_id] + members)}")
+                        
+                    elif cod == "12":  # Solicitação de visualização dos grupos
+                        client_id = message[2:15].strip()
+
+                        # Busca no banco de dados os grupos aos quais o cliente pertence
+                        cursor.execute("SELECT group_id FROM grupos WHERE member_id=?", (client_id,))
+                        groups = cursor.fetchall()
+
+                        if groups:
+                            group_list = ''.join([group[0] for group in groups])
+                            response_message = f"13{group_list}"
+                            conn.sendall(response_message.encode())
                         else:
-                            # Armazena a mensagem no banco de dados se o destinatário não estiver online
-                            cursor.execute("INSERT INTO mensagens (dst, src, timestamp, msg_data) VALUES (?, ?, ?, ?)",
-                                           (dst, src, timestamp, msg_data))
-                            conn_db.commit()
-                            conn.sendall(f"Erro: Destino {dst} não encontrado. Mensagem armazenada para entrega futura. \n".encode())
+                            conn.sendall("13Nenhum grupo encontrado.".encode())
+                            
+                    else:
+                        with client_connections_lock:
+                            if dst in client_connections:
+                                dest_conn = client_connections[dst]
+                                dest_conn.sendall(data)
+                                conn.sendall(f"Sucesso: Mensagem enviada para {dst}! \n".encode())
+                            else:
+                                # Armazena a mensagem no banco de dados se o destinatário não estiver online
+                                cursor.execute("INSERT INTO mensagens (dst, src, timestamp, msg_data) VALUES (?, ?, ?, ?)",
+                                            (dst, src, timestamp, msg_data))
+                                conn_db.commit()
+                                conn.sendall(f"Erro: Destino {dst} não encontrado. Mensagem armazenada para entrega futura. \n".encode())
             except ConnectionResetError:
                 print(f"Conexão resetada pelo cliente {addr}.")
                 break
